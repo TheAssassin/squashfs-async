@@ -39,6 +39,8 @@ OPTIONS:
    -d, --debug
        --direct-limit <DIRECT_LIMIT>    Limit (B) for fetching small files with direct access [default: 0]
    -h, --help                           Print help information
+       --fs-offset <FS_OFFSET>          Byte offset of the squashfs image within the underlying file (e.g. when
+                                        prepended by a header) [default: 0]
        --readers <READERS>              Number of readers [default: 4]
 
 ```

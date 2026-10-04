@@ -7,6 +7,7 @@ pub mod error;
 pub mod fragments;
 pub mod inodes;
 mod metadata;
+mod offset_reader;
 pub mod pools;
 mod squashfuse;
 mod superblock;
@@ -15,6 +16,7 @@ pub mod utils;
 use error::CacheError;
 pub use error::Error;
 use fragments::FragmentsTable;
+pub use offset_reader::OffsetReader;
 pub use superblock::{Compression, SuperBlock};
 
 use std::collections::BTreeMap;
@@ -57,6 +59,17 @@ pub struct Options {
     /// This will use another `cache_mb` amount of cache.
     #[clap(long, default_value_t = 0)]
     pub direct_limit: usize,
+    /// Byte offset of the squashfs image within the underlying file.
+    ///
+    /// Use this when the image is prepended by some kind of header (e.g. a container or
+    /// firmware format): a byte offset from the start of the file to the squashfs superblock.
+    /// All reads from the underlying file(s) undergo the corresponding offset, while positions
+    /// within the image remain image-relative. This is equivalent to the `fs_offset` mount
+    /// option of squashfuse.
+    ///
+    /// Note that this needs no special alignment.
+    #[clap(long, default_value_t = 0)]
+    pub fs_offset: u64,
 }
 
 /// Base structure representing a loaded SquashFS image.
@@ -88,6 +101,7 @@ pub struct SquashFs<R: deadpool::managed::Manager> {
     cache: Option<IndexCache>,
     /// Cache for small files (< direct_limit), that are read at once.
     small_files_cache: Option<LRUCache>,
+    fs_offset: u64,
 }
 impl<R: deadpool::managed::Manager> std::fmt::Debug for SquashFs<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
@@ -193,22 +207,28 @@ where
             );
         }
 
-        let mut r = readers.get(&libc::O_NONBLOCK).unwrap().get().await?;
+        let mut raw = readers.get(&libc::O_NONBLOCK).unwrap().get().await?;
 
-        let superblock = superblock::SuperBlock::from_reader(&mut r.deref_mut()).await?;
+        let superblock = {
+            // The offset translation is applied to all reads: here for the superblock, then
+            // for the tables, see below (where the reader must be re-wrapped, as the pooled
+            // reader may change depending on [`TABLES_DIRECT_THRESHOLD`]).
+            let mut r = OffsetReader::new(raw.deref_mut(), options.fs_offset);
+            superblock::SuperBlock::from_reader(&mut r).await?
+        };
         debug!(
             "{:?} Tables take {} bytes",
             superblock,
             superblock.tables_length()
         );
 
-        let mut r = if superblock.tables_length() < TABLES_DIRECT_THRESHOLD {
-            r
+        let mut raw = if superblock.tables_length() < TABLES_DIRECT_THRESHOLD {
+            raw
         } else {
             // Don't use direct access if the tables are quite large
             readers.get(&0).unwrap().get().await?
         };
-        let mut r = r.deref_mut();
+        let mut r = OffsetReader::new(raw.deref_mut(), options.fs_offset);
         let root_inode =
             inodes::InodeTable::read_root_inode(superblock.root_inode, &superblock, &mut r).await?;
         let inode_table = inodes::InodeTable::from_reader(&superblock, &mut r).await?;
@@ -220,12 +240,8 @@ where
         for (inode, dir) in &inode_table.directories {
             directory_table.insert(
                 *inode,
-                directory_table::DirectoryTable::from_reader_directory(
-                    dir,
-                    &superblock,
-                    r.deref_mut(),
-                )
-                .await?,
+                directory_table::DirectoryTable::from_reader_directory(dir, &superblock, &mut r)
+                    .await?,
             );
         }
 
@@ -264,6 +280,7 @@ where
             handles: Default::default(),
             readers: RwLock::new(readers),
             direct_limit: options.direct_limit,
+            fs_offset: options.fs_offset,
         })
     }
 }

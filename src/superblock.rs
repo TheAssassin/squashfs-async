@@ -1,5 +1,6 @@
 use serde::Deserialize;
 use serde_repr::Deserialize_repr;
+use tokio::io::AsyncSeekExt;
 use tracing::*;
 
 use super::error::DecompressError;
@@ -99,6 +100,11 @@ pub struct SuperBlock {
 impl SuperBlock {
     pub async fn from_reader(mut r: impl crate::AsyncSeekBufRead) -> Result<Self, Error> {
         debug!("Reading superblock");
+        // Seek to the start of the image, as seen by the (possibly offset-translating)
+        // reader.
+        r.seek(std::io::SeekFrom::Start(0))
+            .await
+            .map_err(Error::ReadFailure)?;
         let mut superblock: Self = super::deser::bincode_deser_from(&mut r, 96)
             .await
             .map_err(|_| Error::InvalidSuperblock)?;

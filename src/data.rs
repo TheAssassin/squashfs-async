@@ -9,6 +9,7 @@ use tokio::io::{AsyncBufRead, AsyncReadExt, AsyncSeekExt, AsyncWrite};
 use tracing::*;
 
 use super::error::DecompressError;
+use super::offset_reader::OffsetReader;
 use super::superblock::Compression;
 use super::Error;
 use super::SquashFs;
@@ -114,6 +115,7 @@ impl<
                         "Accessing small file (< direct limit) in direct mode"
                     );
                     let mut reader = self.get_reader(flags).await?;
+                    let mut reader = OffsetReader::new(reader.deref_mut(), self.fs_offset);
                     // Read the raw contents
                     reader
                         .seek(std::io::SeekFrom::Start(first.block_start))
@@ -143,14 +145,9 @@ impl<
             return Ok(buf.into());
         }
         let mut reader = self.get_reader(flags).await?;
-        self.read_file_impl(
-            file,
-            (reader.deref_mut(), 0),
-            inode,
-            (offset, size),
-            compression,
-        )
-        .await
+        let mut reader = OffsetReader::new(reader.deref_mut(), self.fs_offset);
+        self.read_file_impl(file, (&mut reader, 0), inode, (offset, size), compression)
+            .await
     }
     #[allow(clippy::borrowed_box)]
     pub async fn read_file_impl(
