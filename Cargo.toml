@@ -10,6 +10,9 @@ readme = "README.md"
 category = ["filesystem"]
 include = ["src/**/*", "README.md"]
 
+[patch.crates-io]
+fuser-async = { git = "https://github.com/TheAssassin/fuser-async", branch = "readlink" }
+
 [profile.release]
 incremental = true
 lto = "thin"
