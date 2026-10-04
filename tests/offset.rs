@@ -36,13 +36,15 @@ fn pattern(size: usize, seed: u8) -> Vec<u8> {
         .collect()
 }
 
-/// Path→contents of the test files, created by [`create_image`].
+/// Path→contents of the test files, created by [`create_image`]. The `exec` file has mode
+/// 0755; `subdir/link` is a symlink to `nested`.
 fn test_files() -> BTreeMap<String, Vec<u8>> {
     [
         ("small".to_string(), pattern(4321, 1)),
         ("medium".to_string(), pattern(300_003, 2)),
         ("large".to_string(), pattern(200_001, 3)),
         ("zeros".to_string(), vec![0u8; 400_000]),
+        ("exec".to_string(), pattern(5_000, 5)),
         ("subdir/nested".to_string(), pattern(70_000, 4)),
     ]
     .into_iter()
@@ -52,7 +54,13 @@ fn test_files() -> BTreeMap<String, Vec<u8>> {
 fn mksquashfs(input: &Path, dest: &Path, options: &[&str]) -> anyhow::Result<()> {
     let cmd = std::process::Command::new("mksquashfs")
         .args([input, dest])
-        .args(["-mkfs-time", "0", "-reproducible", "-no-xattrs"])
+        .args([
+            "-mkfs-time",
+            "0",
+            "-reproducible",
+            "-no-xattrs",
+            "-all-root",
+        ])
         .args(options)
         .output()?;
     if !cmd.status.success() {
@@ -64,8 +72,10 @@ fn mksquashfs(input: &Path, dest: &Path, options: &[&str]) -> anyhow::Result<()>
     Ok(())
 }
 
-/// Create a squashfs image with the given options, containing the files of [`test_files`].
+/// Create a squashfs image with the given options, containing the files of [`test_files`]
+/// (plus a symlink `subdir/link` → `nested`), with fixed modes and all-root ownership.
 fn create_image(dir: &Path, spec: &str, options: &[&str]) -> anyhow::Result<std::path::PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
     let contents = dir.join("contents");
     if contents.exists() {
         std::fs::remove_dir_all(&contents)?;
@@ -74,7 +84,19 @@ fn create_image(dir: &Path, spec: &str, options: &[&str]) -> anyhow::Result<std:
         let path = contents.join(&path);
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(&path, &bytes)?;
+        let mode = if path.file_name().unwrap() == "exec" {
+            0o755
+        } else {
+            0o644
+        };
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode))?;
     }
+    // Directories with fixed modes, and a symlink.
+    std::fs::set_permissions(
+        contents.join("subdir"),
+        std::fs::Permissions::from_mode(0o755),
+    )?;
+    std::os::unix::fs::symlink("nested", contents.join("subdir/link"))?;
     let image = dir.join(format!("{spec}.squashfs"));
     mksquashfs(&contents, &image, options)?;
     std::fs::remove_dir_all(&contents)?;
@@ -204,6 +226,26 @@ async fn check_reads(
     Ok(())
 }
 
+/// Check that modes and ownership are reported correctly via the filesystem API (the images
+/// are created with `-all-root`, so all inodes must be owned by root).
+async fn check_attrs(fs: &SquashFs<LocalReadersPoolTokio>) -> anyhow::Result<()> {
+    let exec = lookup_path(fs, "exec").await?;
+    assert_eq!(exec.perm, 0o755, "executable file mode");
+    assert_eq!(exec.kind, fuser::FileType::RegularFile);
+    assert_eq!(exec.uid, 0, "executable file uid");
+    assert_eq!(exec.gid, 0, "executable file gid");
+    let small = lookup_path(fs, "small").await?;
+    assert_eq!(small.perm, 0o644, "regular file mode");
+    let subdir = lookup_path(fs, "subdir").await?;
+    assert_eq!(subdir.perm, 0o755, "subdirectory mode");
+    assert_eq!(subdir.kind, fuser::FileType::Directory);
+    let link = lookup_path(fs, "subdir/link").await?;
+    assert_eq!(link.kind, fuser::FileType::Symlink);
+    let target = fs.readlink(link.ino).await?;
+    assert_eq!(target, b"nested");
+    Ok(())
+}
+
 #[tokio::test]
 async fn fs_offset() -> anyhow::Result<()> {
     for (spec, mksquashfs_options) in &SPECS {
@@ -252,7 +294,46 @@ async fn fs_offset() -> anyhow::Result<()> {
             let b = read_file(&with_offset, path.0.as_str(), 0).await?;
             assert_eq!(a, b);
         }
+
+        // Modes and ownership must be reported from the image in both cases.
+        check_attrs(&original).await?;
+        check_attrs(&with_offset).await?;
     }
+    Ok(())
+}
+
+/// Mutation attempts must be refused with a read-only error: squashfs images are immutable.
+#[tokio::test]
+async fn read_only() -> anyhow::Result<()> {
+    use fuser_async::Error as ErrorFuse;
+    let dir = tempfile::tempdir()?;
+    let image = create_image(dir.path(), "gzip", SPECS[1].1)?;
+    let mut fs = SquashFs::<LocalReadersPoolTokio>::open(&image, &options(0, 0)).await?;
+
+    // Non-read-only open flags are rejected, like in squashfuse_ll.
+    let ino = lookup_path(&fs, "small").await?.ino;
+    assert!(matches!(
+        fs.open(ino, libc::O_RDONLY | libc::O_WRONLY).await,
+        Err(Error::Fuse(ErrorFuse::ReadOnly))
+    ));
+
+    assert!(matches!(
+        fs.write(ino, 0, bytes::Bytes::from_static(b"x"), 0).await,
+        Err(Error::Fuse(ErrorFuse::ReadOnly))
+    ));
+    assert!(matches!(
+        fs.create(fuser::FUSE_ROOT_ID, "new".into(), 0o644, 0, libc::O_WRONLY)
+            .await,
+        Err(Error::Fuse(ErrorFuse::ReadOnly))
+    ));
+    assert!(matches!(
+        fs.mkdir(fuser::FUSE_ROOT_ID, "newdir".into()).await,
+        Err(Error::Fuse(ErrorFuse::ReadOnly))
+    ));
+    assert!(matches!(
+        fs.setattr(ino, Some(1)).await,
+        Err(Error::Fuse(ErrorFuse::ReadOnly))
+    ));
     Ok(())
 }
 

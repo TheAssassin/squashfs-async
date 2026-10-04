@@ -68,16 +68,19 @@ impl InodeType {
     pub(crate) fn is_dir(&self) -> bool {
         matches!(self, Self::BasicDirectory | Self::ExtendedDirectory)
     }
+    pub fn is_symlink(&self) -> bool {
+        matches!(self, Self::BasicSymlink | Self::ExtendedSymlink)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct InodeHeader {
     inode_type: InodeType,
-    _permissions: u16,
-    _uid_idx: u16,
-    _gid_idx: u16,
-    _modified_time: u32,
-    inode_number: u32,
+    pub permissions: u16,
+    pub uid_idx: u16,
+    pub gid_idx: u16,
+    pub modified_time: u32,
+    pub inode_number: u32,
 }
 from_reader!(InodeHeader, 16);
 
@@ -166,28 +169,27 @@ impl InodeTable {
             };
             match header.inode_type {
                 InodeType::BasicFile => {
-                    let file = BasicFile::from_reader(&mut r, superblock).await?;
+                    let file = BasicFile::from_reader(&mut r, superblock, &header).await?;
                     table.files.insert(header.inode_number, Box::new(file));
                 }
                 InodeType::ExtendedFile => {
-                    let file = ExtendedFile::from_reader(&mut r, superblock).await?;
+                    let file = ExtendedFile::from_reader(&mut r, superblock, &header).await?;
                     table.files.insert(header.inode_number, Box::new(file));
                 }
                 InodeType::BasicDirectory => {
-                    let dir = BasicDirectory::from_reader(&mut r)
-                        .await
-                        .map_err(|_| InodeTableError::InvalidEntry)?;
+                    let dir = BasicDirectory::from_reader(&mut r, &header).await?;
                     table.directories.insert(header.inode_number, Box::new(dir));
                 }
                 InodeType::ExtendedDirectory => {
-                    let dir = ExtendedDirectory::from_reader(&mut r).await?;
+                    let dir = ExtendedDirectory::from_reader(&mut r, &header).await?;
                     table.directories.insert(header.inode_number, Box::new(dir));
                 }
                 InodeType::BasicSymlink => {
-                    symlink::Symlink::from_reader(&mut r).await?;
+                    let link = symlink::Symlink::from_reader(&mut r, &header).await?;
+                    table.files.insert(header.inode_number, Box::new(link));
                 }
                 _ => {
-                    warn!("Skipping unsupposed inode of type {:?}", header.inode_type);
+                    warn!("Skipping unsupported inode of type {:?}", header.inode_type);
                 }
             }
         }

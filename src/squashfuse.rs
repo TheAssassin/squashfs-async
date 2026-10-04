@@ -14,6 +14,8 @@ impl From<&super::directory_table::Entry> for DirEntry {
             name: e.name.clone(),
             file_type: if e.is_dir() {
                 fuser::FileType::Directory
+            } else if e.r#type.is_symlink() {
+                fuser::FileType::Symlink
             } else {
                 fuser::FileType::RegularFile
             },
@@ -45,37 +47,68 @@ impl<R: deadpool::managed::Manager> SquashFs<R> {
         }
     }
     fn getattr_inode(&self, ino: u32) -> Result<fuser::FileAttr, Error> {
+        fn mtime_of(modified_time: u32) -> std::time::SystemTime {
+            UNIX_EPOCH + std::time::Duration::from_secs(modified_time as u64)
+        }
+        // Fail early if the inode has neither a file nor a directory entry.
+        let id = |idx: u16| -> Result<u32, Error> { self.id_table.id(idx) };
         if let Some(f) = self.inode_table.files.get(&ino) {
-            Ok(fuser_async::utils::file_attr(
+            let mut attr = fuser_async::utils::file_attr(
                 self.ino_to_fuse(ino),
                 f.file_size(),
-                UNIX_EPOCH,
-            ))
+                mtime_of(f.modified_time()),
+            );
+            attr.kind = if f.is_symlink() {
+                fuser::FileType::Symlink
+            } else {
+                attr.kind
+            };
+            attr.perm = f.permissions() & 0o7777;
+            attr.uid = id(f.uid_idx())?;
+            attr.gid = id(f.gid_idx())?;
+            Ok(attr)
         } else {
             let directory = self
                 .inode_table
                 .directories
                 .get(&ino)
                 .ok_or(Error::DirectoryNotFound)?;
+            let time = mtime_of(directory.modified_time());
             Ok(fuser::FileAttr {
                 ino: self.ino_to_fuse(ino),
                 size: 0,
                 blocks: 0,
-                // TODO: Set these.
-                atime: UNIX_EPOCH,
-                mtime: UNIX_EPOCH,
-                ctime: UNIX_EPOCH,
-                crtime: UNIX_EPOCH,
+                atime: time,
+                mtime: time,
+                ctime: time,
+                crtime: time,
                 kind: fuser::FileType::Directory,
-                perm: 0o755,
+                perm: directory.permissions() & 0o7777,
                 nlink: directory.hard_link_count(),
-                uid: 501,
-                gid: 20,
+                uid: id(directory.uid_idx())?,
+                gid: id(directory.gid_idx())?,
                 rdev: 0,
                 flags: 0,
                 blksize: BLOCK_SIZE,
             })
         }
+    }
+    /// Read the target of a symlink inode (the `readlink` FUSE operation).
+    pub async fn readlink(&self, ino: u64) -> Result<Vec<u8>, Error> {
+        let ino = self.ino_from_fuse(ino)?;
+        let link = self
+            .inode_table
+            .files
+            .get(&ino)
+            .ok_or(Error::FileNotFound(None))?;
+        if !link.is_symlink() {
+            return Err(Error::InvalidInode);
+        }
+        Ok(link
+            .target()
+            .ok_or(Error::InvalidInode)?
+            .as_bytes()
+            .to_vec())
     }
 }
 
@@ -86,11 +119,20 @@ impl<
     > fuser_async::Filesystem for SquashFs<R>
 {
     type Error = Error;
+    async fn readlink(&self, ino: u64) -> Result<Vec<u8>, Error> {
+        self.readlink(ino).await
+    }
+
     async fn inodes(&self) -> Result<BTreeSet<u64>, Error> {
         Ok(self.inodes().map(|ino| self.ino_to_fuse(ino)).collect())
     }
 
     async fn open(&self, _ino: u64, flags: i32) -> Result<u64, Self::Error> {
+        // Squashfs images are immutable: like the reference `squashfuse_ll`, reject
+        // non-read-only access modes with a read-only error, rather than stripping them.
+        if flags & libc::O_ACCMODE != libc::O_RDONLY {
+            return Err(ErrorFuse::ReadOnly.into());
+        }
         let mut handles = self.handles.write().await;
         let fh = handles.keys().last().copied().unwrap_or_default() + 1;
         handles.insert(fh, flags);
@@ -125,7 +167,7 @@ impl<
         _ino: u64,
         _size: Option<u64>,
     ) -> Result<fuser::FileAttr, Self::Error> {
-        Err(ErrorFuse::Unimplemented.into())
+        Err(ErrorFuse::ReadOnly.into())
     }
     async fn readdir(
         &self,

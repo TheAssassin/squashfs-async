@@ -5,6 +5,7 @@ mod deser;
 pub mod directory_table;
 pub mod error;
 pub mod fragments;
+pub mod ids;
 pub mod inodes;
 mod metadata;
 mod offset_reader;
@@ -16,6 +17,7 @@ pub mod utils;
 use error::CacheError;
 pub use error::Error;
 use fragments::FragmentsTable;
+pub use ids::IdTable;
 pub use offset_reader::OffsetReader;
 pub use superblock::{Compression, SuperBlock};
 
@@ -85,6 +87,7 @@ pub struct SquashFs<R: deadpool::managed::Manager> {
     pub superblock: superblock::SuperBlock,
     pub inode_table: inodes::InodeTable,
     pub fragments_table: FragmentsTable,
+    pub id_table: IdTable,
     /// Table for each directory inode
     pub directory_tables: BTreeMap<u32 /* inode */, directory_table::DirectoryTable>,
     root_inode: u32,
@@ -107,6 +110,7 @@ impl<R: deadpool::managed::Manager> std::fmt::Debug for SquashFs<R> {
     fn fmt(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
         writeln!(f, "{:?}", self.superblock)?;
         writeln!(f, "{}", self.fragments_table)?;
+        writeln!(f, "{}", self.id_table)?;
         writeln!(f, "{}, root inode {}", self.inode_table, self.root_inode)?;
         self.tree(0, self.root_inode, f)?;
         if let Some(cache) = &self.cache {
@@ -233,6 +237,7 @@ where
             inodes::InodeTable::read_root_inode(superblock.root_inode, &superblock, &mut r).await?;
         let inode_table = inodes::InodeTable::from_reader(&superblock, &mut r).await?;
         let fragments_table = fragments::FragmentsTable::from_reader(&superblock, &mut r).await?;
+        let id_table = ids::IdTable::from_reader(&superblock, &mut r).await?;
         let mut directory_table: BTreeMap<u32, directory_table::DirectoryTable> =
             Default::default();
 
@@ -274,6 +279,7 @@ where
             n_readers: options.readers,
             directory_tables: directory_table,
             fragments_table,
+            id_table,
             inode_table,
             manager_factory,
             root_inode,

@@ -45,12 +45,16 @@ pub enum Error {
     DirectoryTable(#[from] DirectoryTableError),
     #[error("Metadata error: {0}")]
     Metadata(#[from] MetadataError),
+    #[error("Id table error: {0}")]
+    IdTable(#[from] IdTableError),
     #[error("Decompression error: {0}")]
     Decompress(#[from] DecompressError),
     #[error("Unsupported encoding")]
     Encoding,
     #[error("Invalid inode")]
     InvalidInode,
+    #[error("Invalid uid/gid index")]
+    InvalidIdIndex,
     #[cfg(feature = "memmap")]
     #[error("Failed to memory map file")]
     MemMap,
@@ -124,6 +128,18 @@ pub enum FragmentsError {
     #[error("Invalid metadata: {0}")]
     InvalidMetadata(#[from] MetadataError),
     #[error("Invalid fragment table entry")]
+    InvalidEntry,
+    #[error("Read failure")]
+    ReadFailure(std::io::Error),
+}
+/// Id table error.
+#[derive(thiserror::Error, Debug)]
+pub enum IdTableError {
+    #[error("Invalid location in id table")]
+    InvalidLocation,
+    #[error("Invalid metadata: {0}")]
+    InvalidMetadata(#[from] MetadataError),
+    #[error("Invalid id table entry")]
     InvalidEntry,
     #[error("Read failure")]
     ReadFailure(std::io::Error),

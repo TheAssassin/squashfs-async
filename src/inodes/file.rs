@@ -7,6 +7,7 @@ use super::super::deser;
 use super::super::error::InodeTableError;
 use super::super::fragments::FragmentLocation;
 use super::super::superblock::SuperBlock;
+use super::InodeHeader;
 
 /// Trait to encompass `BasicFile` and `ExtendedFile`.
 pub trait FileInode: Send + Sync + std::fmt::Debug {
@@ -15,6 +16,17 @@ pub trait FileInode: Send + Sync + std::fmt::Debug {
     fn add_block_size(&mut self, size: BlockSize);
     fn block_sizes(&self) -> &Vec<BlockSize>;
     fn fragment(&self) -> FragmentLocation;
+    fn permissions(&self) -> u16;
+    fn uid_idx(&self) -> u16;
+    fn gid_idx(&self) -> u16;
+    fn modified_time(&self) -> u32;
+    fn is_symlink(&self) -> bool {
+        false
+    }
+    /// Target of a symlink inode, for non-symlink inodes `None`.
+    fn target(&self) -> Option<&str> {
+        None
+    }
     fn fragment_size(&self, superblock: &SuperBlock) -> u64 {
         let fragment = self.fragment();
         if !fragment.valid() {
@@ -38,6 +50,8 @@ pub trait FileInode: Send + Sync + std::fmt::Debug {
 #[async_trait]
 pub trait FileInodeDeser: FileInode + serde::de::DeserializeOwned + Sized {
     fn encoded_size() -> usize;
+    /// Fill the inode metadata (permissions/ids/mtime) from the inode header.
+    fn set_metadata(&mut self, header: &InodeHeader);
     fn n_blocks(&self, superblock: &SuperBlock) -> u32 {
         let n = self.file_size() as f64 / superblock.block_size as f64;
         if self.fragment().valid() {
@@ -50,6 +64,7 @@ pub trait FileInodeDeser: FileInode + serde::de::DeserializeOwned + Sized {
     async fn from_reader(
         mut r: impl AsyncRead + std::marker::Unpin + Send + Sync,
         superblock: &SuperBlock,
+        header: &InodeHeader,
     ) -> Result<Self, InodeTableError> {
         let mut file: Self = deser::bincode_deser_from(&mut r, Self::encoded_size())
             .await
@@ -61,6 +76,7 @@ pub trait FileInodeDeser: FileInode + serde::de::DeserializeOwned + Sized {
                     .map_err(|_| InodeTableError::InvalidEntry)?,
             ));
         }
+        file.set_metadata(header);
         Ok(file)
     }
 }
@@ -74,10 +90,24 @@ pub(crate) struct BasicFile {
     file_size: u32,
     #[serde(skip)]
     block_sizes: Vec<BlockSize>,
+    #[serde(skip)]
+    permissions: u16,
+    #[serde(skip)]
+    uid_idx: u16,
+    #[serde(skip)]
+    gid_idx: u16,
+    #[serde(skip)]
+    modified_time: u32,
 }
 impl FileInodeDeser for BasicFile {
     fn encoded_size() -> usize {
         16
+    }
+    fn set_metadata(&mut self, header: &InodeHeader) {
+        self.permissions = header.permissions;
+        self.uid_idx = header.uid_idx;
+        self.gid_idx = header.gid_idx;
+        self.modified_time = header.modified_time;
     }
 }
 
@@ -101,6 +131,18 @@ impl FileInode for BasicFile {
             offset: self.fragment_offset,
         }
     }
+    fn permissions(&self) -> u16 {
+        self.permissions
+    }
+    fn uid_idx(&self) -> u16 {
+        self.uid_idx
+    }
+    fn gid_idx(&self) -> u16 {
+        self.gid_idx
+    }
+    fn modified_time(&self) -> u32 {
+        self.modified_time
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -114,10 +156,24 @@ pub(crate) struct ExtendedFile {
     _xattr_idx: u32,
     #[serde(skip)]
     block_sizes: Vec<BlockSize>,
+    #[serde(skip)]
+    permissions: u16,
+    #[serde(skip)]
+    uid_idx: u16,
+    #[serde(skip)]
+    gid_idx: u16,
+    #[serde(skip)]
+    modified_time: u32,
 }
 impl FileInodeDeser for ExtendedFile {
     fn encoded_size() -> usize {
         40
+    }
+    fn set_metadata(&mut self, header: &InodeHeader) {
+        self.permissions = header.permissions;
+        self.uid_idx = header.uid_idx;
+        self.gid_idx = header.gid_idx;
+        self.modified_time = header.modified_time;
     }
 }
 #[async_trait]
@@ -139,5 +195,17 @@ impl FileInode for ExtendedFile {
             index: self.fragment_index,
             offset: self.fragment_offset,
         }
+    }
+    fn permissions(&self) -> u16 {
+        self.permissions
+    }
+    fn uid_idx(&self) -> u16 {
+        self.uid_idx
+    }
+    fn gid_idx(&self) -> u16 {
+        self.gid_idx
+    }
+    fn modified_time(&self) -> u32 {
+        self.modified_time
     }
 }

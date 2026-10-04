@@ -31,7 +31,13 @@ where
     let _mount = fuser::spawn_mount2(
         fuse,
         mountpoint,
-        &[fuser::MountOption::RO, fuser::MountOption::Async],
+        // default_permissions makes the kernel enforce the permissions stored in the image
+        // (e.g. executable bits), as reported via getattr.
+        &[
+            fuser::MountOption::RO,
+            fuser::MountOption::DefaultPermissions,
+            fuser::MountOption::Async,
+        ],
     )?;
     tokio::signal::ctrl_c().await?;
     Ok(())

@@ -1,7 +1,8 @@
 use serde::Deserialize;
 
-use super::super::deser::{self, from_reader};
+use super::super::deser;
 use super::super::error::InodeTableError;
+use super::InodeHeader;
 
 /// Location in the directory table.
 #[derive(Default, Debug, Clone)]
@@ -15,6 +16,10 @@ pub trait DirectoryInode: std::fmt::Debug {
     fn hard_link_count(&self) -> u32;
     fn parent_inode_number(&self) -> u32;
     fn table_location(&self) -> DirectoryTableLocation;
+    fn permissions(&self) -> u16;
+    fn uid_idx(&self) -> u16;
+    fn gid_idx(&self) -> u16;
+    fn modified_time(&self) -> u32;
 }
 #[derive(Debug, Default, Deserialize)]
 pub struct BasicDirectory {
@@ -23,8 +28,30 @@ pub struct BasicDirectory {
     file_size: u16,
     block_offset: u16,
     parent_inode_number: u32,
+    #[serde(skip)]
+    permissions: u16,
+    #[serde(skip)]
+    uid_idx: u16,
+    #[serde(skip)]
+    gid_idx: u16,
+    #[serde(skip)]
+    modified_time: u32,
 }
-from_reader!(BasicDirectory, 16);
+impl BasicDirectory {
+    pub async fn from_reader(
+        mut r: impl crate::AsyncRead,
+        header: &InodeHeader,
+    ) -> Result<Self, InodeTableError> {
+        let mut dir: Self = deser::bincode_deser_from(&mut r, 16)
+            .await
+            .map_err(|_| InodeTableError::InvalidEntry)?;
+        dir.permissions = header.permissions;
+        dir.uid_idx = header.uid_idx;
+        dir.gid_idx = header.gid_idx;
+        dir.modified_time = header.modified_time;
+        Ok(dir)
+    }
+}
 impl DirectoryInode for BasicDirectory {
     fn hard_link_count(&self) -> u32 {
         self.hard_link_count
@@ -38,6 +65,18 @@ impl DirectoryInode for BasicDirectory {
             offset: self.block_offset as u64,
             file_size: self.file_size as u64,
         }
+    }
+    fn permissions(&self) -> u16 {
+        self.permissions
+    }
+    fn uid_idx(&self) -> u16 {
+        self.uid_idx
+    }
+    fn gid_idx(&self) -> u16 {
+        self.gid_idx
+    }
+    fn modified_time(&self) -> u32 {
+        self.modified_time
     }
 }
 
@@ -72,6 +111,14 @@ pub struct ExtendedDirectory {
     _xattr_idx: u32,
     #[serde(skip)]
     index: Vec<DirectoryIndex>,
+    #[serde(skip)]
+    permissions: u16,
+    #[serde(skip)]
+    uid_idx: u16,
+    #[serde(skip)]
+    gid_idx: u16,
+    #[serde(skip)]
+    modified_time: u32,
 }
 impl DirectoryInode for ExtendedDirectory {
     fn hard_link_count(&self) -> u32 {
@@ -87,15 +134,34 @@ impl DirectoryInode for ExtendedDirectory {
             file_size: self.file_size as u64,
         }
     }
+    fn permissions(&self) -> u16 {
+        self.permissions
+    }
+    fn uid_idx(&self) -> u16 {
+        self.uid_idx
+    }
+    fn gid_idx(&self) -> u16 {
+        self.gid_idx
+    }
+    fn modified_time(&self) -> u32 {
+        self.modified_time
+    }
 }
 impl ExtendedDirectory {
-    pub async fn from_reader(mut r: impl crate::AsyncRead) -> Result<Self, InodeTableError> {
+    pub async fn from_reader(
+        mut r: impl crate::AsyncRead,
+        header: &InodeHeader,
+    ) -> Result<Self, InodeTableError> {
         let mut dir: Self = deser::bincode_deser_from(&mut r, 24)
             .await
             .map_err(|_| InodeTableError::InvalidEntry)?;
         for _ in 0..dir.index_count {
             dir.index.push(DirectoryIndex::from_reader(&mut r).await?);
         }
+        dir.permissions = header.permissions;
+        dir.uid_idx = header.uid_idx;
+        dir.gid_idx = header.gid_idx;
+        dir.modified_time = header.modified_time;
         Ok(dir)
     }
 }
